@@ -1,3 +1,4 @@
+require 'cunn'
 local cv = require 'cv'
 require 'cv.features2d'
 require 'cv.imgcodecs'
@@ -28,41 +29,47 @@ local function findKeypoints(detector, image, mask)
     local imageSize = {image:size()[2], image:size()[1]}
     keyPts = cv.KeyPointsFilter.runByImageBorder{keyPts, imageSize, opt.patchSize/2+1}
     
+    local pts = torch.Tensor(keyPts.size, 2) --because writing to keyPts (keyPts.data[i].pt.x = -1e5) sometimes breaks the underlying data, wtf...
+    for i=1,keyPts.size do
+       pts[i][1] = keyPts.data[i].pt.x
+       pts[i][2] = keyPts.data[i].pt.y
+    end
+    
     --nms: remove points too close together (keep those with stronger response)
     local th = 8 --px 
     local quality = torch.Tensor(keyPts.size)
     for i=1,quality:size(1) do quality[i] = keyPts.data[i].response end
     local q,index = quality:sort(true)
-    
+
     local nremoved = 0
-    for i=1,quality:size(1) do
-        for j=1,i-1 do
-            local d = (keyPts.data[i].pt.x - keyPts.data[j].pt.x)^2 + (keyPts.data[i].pt.y - keyPts.data[j].pt.y)^2
-            if d < 8^2 then keyPts.data[i].pt.x = -1e5; nremoved = nremoved + 1; break end
+    for ii=1,quality:size(1) do
+        for jj=1,ii-1 do
+            local i,j = index[ii], index[jj]
+            local d = (pts[i][1] - pts[j][1])^2 + (pts[i][2] - pts[j][1])^2
+            if d < 8^2 then pts[i][1] = -1e5; nremoved = nremoved + 1; break end
         end
     end
 
-    return keyPts
-end 
+    return pts, keyPts
+end
 
 ------------------
-local function extractKeypoints(keypts, imageT, imid)
+local function extractKeypoints(pts, imageT, imid)
     imid = imid or 1
-    local patches = torch.Tensor(keypts.size, imageT:size(1), opt.patchSize, opt.patchSize)
-    local coords = torch.Tensor(keypts.size, 3)
+    local patches = torch.Tensor(pts:size(1), imageT:size(1), opt.patchSize, opt.patchSize)
+    local coords = torch.Tensor(pts:size(1), 3)
 
     local idx = 1    
-    for i=1,keypts.size do
-        local x,y = math.ceil(keypts.data[i].pt.x - opt.patchSize/2), math.ceil(keypts.data[i].pt.y - opt.patchSize/2)
+    for i=1,pts:size(1) do
+        local x,y = math.ceil(pts[i][1] - opt.patchSize/2), math.ceil(pts[i][2] - opt.patchSize/2)
         if x>0 and y>0 then
             local p = imageT:narrow(2,y,opt.patchSize):narrow(3,x,opt.patchSize)
-            coords[idx][1] = keypts.data[i].pt.x; coords[idx][2] = keypts.data[i].pt.y; coords[idx][3] = imid;
+            coords[idx][1] = pts[i][1]; coords[idx][2] = pts[i][2]; coords[idx][3] = imid;
             patches[idx]:copy(p)
             idx = idx + 1
         end
     end 
-    
-    print('Skipped '..(keypts.size-idx+1)..'/'..keypts.size)
+    print('Skipped '..(pts:size(1)-idx+1)..'/'..pts:size(1))
     return {patches:narrow(1,1,idx-1), coords:narrow(1,1,idx-1)}
 end
 
@@ -161,12 +168,22 @@ local function plotTopKeypoints(ap, kps, image, k, matches)
     return image
 end
 
-
-
+------------------
+local function plotKeypointsFiltered(kps, image)
+    for i = 1,kps:size(1) do
+        local kp = kps[i]
+        if kp[3]==1 then
+            cv.circle{image, {kp[1], kp[2]}, 3, {0,255,0}}
+        else
+            cv.circle{image, {kp[1], kp[2]}, 3, {255,255,0}}
+        end
+    end
+    return image
+end
 
 ------------------
 local function plotKeypoints(detector, img, title)
-    local keyPts = findKeypoints(detector, img)
+    local _, keyPts = findKeypoints(detector, img)
 
     -- show keypoints to the user
     local imgWithAllKeypoints = cv.drawKeypoints{img, keyPts}
@@ -194,8 +211,8 @@ local desc = kaze
 
 --[[
 cv.namedWindow{"win1"}; cv.namedWindow{"win2"}
-plotKeypoints(desc, cv.imread{paths.concat(getPatchDir(), opt.s, 'maps', 'photo_crop.png')}, 'win1')
-plotKeypoints(desc, cv.imread{paths.concat(getPatchDir(), opt.s, 'maps', 'panorama_crop_12.png')}, 'win2')
+plotKeypoints(desc, cv.imread{paths.concat(getPatchDir(), opt.s, 'cyl', 'photo_crop.png')}, 'win1')
+plotKeypoints(desc, cv.imread{paths.concat(getPatchDir(), opt.s, 'cyl', 'panorama_crop_12.png')}, 'win2')
 cv.waitKey{0}
 boom()--]]
 
@@ -212,6 +229,13 @@ for k,v in pairs(decoys) do
         kpDB[2] = torch.cat(kpDB[2], kp[2], 1)
     end
 end    
+
+--[[
+local image1 = cv.imread{paths.concat(getPatchDir(opt.s), 'photo'..cr..'.png')} 
+image1 = plotKeypointsFiltered(kpQ[2], image1)
+local image2 = cv.imread{paths.concat(getPatchDir(opt.s), 'panorama'..cr..'_12.png')} 
+image2 = plotKeypointsFiltered(kpDB[2], image2)
+cv.imshow{"win1", image1}; cv.imshow{"win2", image2}; cv.waitKey{0}    --]]
 
 --- Compute matches
 local matches, scores = fullMatch(model, kpQ[1], kpDB[1], false, 256)
